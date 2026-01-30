@@ -8,9 +8,10 @@
 local KeyIndex = {}
 KeyIndex.__index = KeyIndex
 
-function KeyIndex.new(shared_dict, prefix, delete_callback)
+function KeyIndex.new(shared_dict, lock, prefix, delete_callback)
   local self = setmetatable({}, KeyIndex)
   self.dict = shared_dict
+  self.lock = lock
   self.key_prefix = prefix .. "key_"
   self.delete_count = prefix .. "delete_count"
   self.key_count = prefix .. "key_count"
@@ -19,11 +20,18 @@ function KeyIndex.new(shared_dict, prefix, delete_callback)
   self.keys = {}
   self.index = {}
   self.delete_callback = delete_callback
+  self.first_synced = false
   return self
 end
 
 -- Loads new keys that might have been added by other workers since last sync.
 function KeyIndex:sync()
+  if not self.first_synced then
+    local _, err = self.lock:lock("lock_key")
+    if err then
+      return
+    end
+  end
   local delete_count = self.dict:get(self.delete_count) or 0
   local N = self.dict:get(self.key_count) or 0
   if self.deleted ~= delete_count then
@@ -33,6 +41,10 @@ function KeyIndex:sync()
   elseif N ~= self.last then
     -- Sync only new keys, if there are any.
     self:sync_range(self.last, N)
+  end
+  if not self.first_synced then
+    self.first_synced = true
+    self.lock:unlock()
   end
   return N
 end
@@ -82,6 +94,9 @@ function KeyIndex:add(key_or_keys, err_msg_lru_eviction)
   for _, key in pairs(keys) do
     while true do
       local N = self:sync()
+      if not self.first_synced then
+        return "First sync is not yet completed"
+      end
       if self.index[key] ~= nil then
         -- key already exists, we can skip it
         break
